@@ -1,65 +1,99 @@
 # Lab 6 — Submission
 
-## Task 1: Checkov on Terraform
-
-Scanner: Checkov 3.3.2. Target: `labs/lab6/vulnerable-iac/terraform/` (5 files, 16 resources).
+## Task 1: Checkov on Terraform + Pulumi
 
 ### Terraform scan
-- Total checks: 129 (49 passed + 80 failed)
-- Passed: 49
-- Failed: 80 (78 terraform-framework + 2 secrets-framework)
+- Tool: Checkov 3.3.2 (`checkov -d labs/lab6/vulnerable-iac/terraform --output cli --output json`)
+- Total checks: 127 (terraform framework) — Passed: 49, Failed: 78, Skipped: 0, resource_count: 16
+- Additional secrets framework: Passed: 0, Failed: 2 (`CKV_SECRET_2` — AWS Access Key in `main.tf` provider block; `CKV_SECRET_6` — Base64 High Entropy String / hardcoded RDS password in `database.tf`)
 
 | Severity | Count |
 |----------|------:|
-| Critical | 0\* |
-| High | 0\* |
-| Medium | 0\* |
-| Low | 0\* |
-| (null / unrated) | 80 |
+| Not populated | 78/78 |
 
-\* Checkov CE without a Prisma/Bridgecrew API key does not populate the `severity` field — every failed check comes back `null`. So triage here is driven by **rule frequency**, exactly as Lecture 6 slide 17 recommends, rather than by severity.
+> Severity is `null` on every finding in this scan output. Checkov's OSS CLI only returns severity via the Bridgecrew/Prisma Cloud platform integration (`--bc-api-key`), which this lab doesn't use — the tool literally prints `Add an api key '--bc-api-key <api-key>' to see more detailed insights`. Frequency/rule-ID analysis below is unaffected since it's counted from `check_id`, not severity.
 
 ### Top 5 rule IDs (by frequency)
 | Rule ID | Count | What it checks |
 |---------|------:|----------------|
-| `CKV_AWS_289` | 4 | IAM policy must not allow permissions-management / resource exposure without constraints |
-| `CKV_AWS_355` | 4 | IAM policy must not use `"*"` as the resource for restrictable actions |
-| `CKV_AWS_23` | 3 | Every security group and rule must have a description |
-| `CKV_AWS_288` | 3 | IAM policy must not allow data exfiltration |
-| `CKV_AWS_290` | 3 | IAM policy must not allow write access without constraints |
+| CKV_AWS_289 | 4 | IAM policy must not allow permissions management / resource exposure without constraints |
+| CKV_AWS_355 | 4 | IAM policy documents must not allow `"*"` as the `Resource` for restrictable actions |
+| CKV_AWS_288 | 3 | IAM policy must not allow data exfiltration |
+| CKV_AWS_290 | 3 | IAM policy must not allow write access without constraints |
+| CKV_AWS_23 / CKV_AWS_382 | 3 (tie) | Security group rules must have a description / must not allow unrestricted egress on all ports |
 
-(The two secrets-framework hits are `CKV_SECRET_2` AWS Access Key in `main.tf:8` and `CKV_SECRET_6` Base64 high-entropy string in `database.tf:48` — hardcoded credentials in the provider block and the DB password.)
+### Pulumi scan
+> Checkov 3.x has no native Pulumi framework (it expects `pulumi preview --json` or the Python SAST framework), so per the lab's own guidance Pulumi was scanned with **KICS** instead (see Task 2) — the `Pulumi-vulnerable.yaml` plumbing file was purpose-built for KICS's native Pulumi YAML support.
+
+| Severity | Count |
+|----------|------:|
+| CRITICAL | 1 |
+| HIGH | 2 |
+| MEDIUM | 1 |
+| LOW | 0 |
+| INFO | 2 |
+
+(full breakdown and findings in Task 2 below)
 
 ### Module-leverage analysis (Lecture 6 slide 17)
-**One fix at the IAM-policy level clears the most findings.** Four of the top-five rules (`CKV_AWS_289`, `CKV_AWS_355`, `CKV_AWS_288`, `CKV_AWS_290`) plus `CKV_AWS_286`, `CKV_AWS_287`, `CKV_AWS_62`, `CKV_AWS_63` all fire on the same root cause: the four over-permissive IAM policies (`admin_policy`, `s3_full_access`, `service_policy`, `privilege_escalation`) each grant `Action: "*"` and/or `Resource: "*"`. If those policies were generated from a shared module that scoped actions to a concrete allow-list and resources to specific ARNs, **~20+ IAM findings across all four policies would disappear from a single change** — far more leverage than fixing each `aws_iam_policy` resource individually. (The S3 buckets show the same pattern: `public_data` and `unencrypted_data` each trip CKV_AWS_18/21/144/145 + CKV2_AWS_6/61/62, so a hardened S3 module with encryption, logging, versioning, and a public-access block as defaults would clear ~16 more in one move.)
+Four of the top-5 Terraform findings (CKV_AWS_289, CKV_AWS_355, CKV_AWS_288, CKV_AWS_290 — 14 combined hits) all fire on the same root cause repeated across four separate IAM policy resources (`admin_policy`, `s3_full_access`, `service_policy`, `privilege_escalation`): every one of them uses `Action: "*"` and/or `Resource: "*"` instead of scoped permissions. If the project had a single shared "least-privilege IAM policy" module that forced explicit `Action`/`Resource` lists as a hard requirement (no wildcard allowed by default), all four resources — and every one of these repeated checks — would pass simultaneously, eliminating roughly 20+ of the 78 failed checks from one module-level change.
 
 ---
 
-## Task 2: KICS on Ansible
+## Task 2: KICS on Ansible + Pulumi
 
-Scanner: KICS v2.1.20 (Docker). Target: `labs/lab6/vulnerable-iac/ansible/` (playbooks + inventory).
+### KICS on Ansible
+- Tool: `checkmarx/kics:latest` v2.1.20, scanned `labs/lab6/vulnerable-iac/ansible/`
 
-### Severity breakdown
+Results Summary: CRITICAL 0, HIGH 9, MEDIUM 0, LOW 1, INFO 0 — **TOTAL 10**
+
 | Severity | Count |
 |----------|------:|
-| CRITICAL | 0 |
-| HIGH | 9 |
-| MEDIUM | 0 |
+| HIGH | 9 (3 distinct queries) |
 | LOW | 1 |
-| INFO | 0 |
-| **Total** | **10** |
 
-### Top KICS queries (by result count)
-| Query | Severity | Results |
-|-------|----------|--------:|
+### Top queries (Ansible, by frequency)
+| Query | Severity | Files/Results |
+|-------|----------|------:|
 | Passwords And Secrets - Generic Password | HIGH | 6 |
 | Passwords And Secrets - Password in URL | HIGH | 2 |
 | Passwords And Secrets - Generic Secret | HIGH | 1 |
 | Unpinned Package Version | LOW | 1 |
 
-The 9 HIGH findings are all hardcoded credentials: `ansible_password`/`ansible_ssh_pass` for root in `inventory.ini`, `db_password`/`admin_password` in the playbooks, and a full DB connection string with embedded credentials in `deploy.yml`.
+Findings included hardcoded passwords/secrets across `inventory.ini` (plaintext SSH and DB admin passwords, API secret key), `deploy.yml` (hardcoded DB password, git credentials embedded in the clone URL, DB connection string), and `configure.yml` (hardcoded admin password) — plus an unpinned `state: latest` package install.
+
+### KICS on Pulumi
+- Tool: same, scanned `labs/lab6/vulnerable-iac/pulumi/` (native `Pulumi-vulnerable.yaml` support)
+
+Results Summary: CRITICAL 1, HIGH 2, MEDIUM 1, LOW 0, INFO 2 — **TOTAL 6**
+
+| Severity | Count |
+|----------|------:|
+| CRITICAL | 1 |
+| HIGH | 2 |
+| MEDIUM | 1 |
+| INFO | 2 |
+
+### Top queries (Pulumi, by frequency)
+| Query | Severity | Results |
+|-------|----------|------:|
+| RDS DB Instance Publicly Accessible | CRITICAL | 1 |
+| DynamoDB Table Not Encrypted | HIGH | 1 |
+| Passwords And Secrets - Generic Password | HIGH | 1 |
+| EC2 Instance Monitoring Disabled | MEDIUM | 1 |
+| DynamoDB Table Point In Time Recovery Disabled | INFO | 1 |
+
+(6th finding not shown in top-5: EC2 Not EBS Optimized — INFO, 1)
 
 ### Checkov vs KICS — when to use which? (Lecture 6 slide 10)
-- **One thing Checkov did better (Terraform).** Checkov's ~2,500 built-in AWS policies gave deep cloud-resource posture coverage — it flagged 80 distinct misconfigurations across IAM, S3, RDS, DynamoDB and security groups (encryption at rest, public-access blocks, IAM wildcard constraints, Multi-AZ, deletion protection, etc.). That breadth of provider-specific resource rules is Checkov's strength; a generic scanner wouldn't reason about, say, `iam_database_authentication_enabled` or `restrict_public_buckets`.
-- **One thing KICS did better (Ansible).** KICS natively parses Ansible playbooks and inventory, so it caught the hardcoded secrets in `inventory.ini`/`deploy.yml`/`configure.yml` that a Terraform-oriented tool would never even open. Its single-engine, multi-platform Rego model (Terraform, Ansible, K8s, Docker, …) means one tool covers formats Checkov's framework set handles unevenly.
-- **A finding only one tool caught.** KICS flagged `Unpinned Package Version` (Ansible `state: latest` in `deploy.yml:99`) — a config-drift / reproducibility risk specific to the Ansible platform that Checkov, scanning Terraform, never sees. Conversely, Checkov's `CKV_AWS_289`/`CKV_AWS_355` IAM-wildcard findings on the Terraform sample have no KICS equivalent in this run because KICS was pointed at the Ansible target. Even on the shared "hardcoded secret" theme the two diverge by target: Checkov caught the AWS access key in `main.tf`, KICS caught the root passwords in `inventory.ini`.
+Checkov did noticeably better on the Terraform sample: its ~2,500 built-in policies gave deep, resource-typed coverage (127 individual checks fired across just 16 resources), including graph-based `CKV2_*` rules that reason about relationships between resources — e.g. `CKV2_AWS_6` correctly linked the `aws_s3_bucket_public_access_block` resource back to the bucket it protects, something a single-resource scanner can't do.
+
+KICS did better on the Ansible sample simply because Checkov has no Ansible framework at all — KICS's "Common" platform queries (secret/password detection) work format-agnostically and caught every hardcoded credential across `inventory.ini`, `deploy.yml`, and `configure.yml`, including the git-URL-embedded credential that a narrower Terraform-only scanner would never see.
+
+The clearest single-resource-type example: the Pulumi `RDS DB Instance Publicly Accessible` (CRITICAL) finding was only catchable by KICS, since Checkov 3.x simply doesn't parse Pulumi source — for that IaC format, Checkov's depth is irrelevant because it never runs at all. This is the practical tool-selection lesson: Checkov for policy depth on frameworks it fully supports (Terraform, CloudFormation, K8s manifests), KICS for broad format coverage (Ansible, Pulumi YAML) and format-agnostic secret scanning.
+
+---
+
+## Environment notes
+- Checkov 3.3.2, KICS v2.1.20 (`checkmarx/kics:latest` via Docker), both run locally against the `labs/lab6/vulnerable-iac/` plumbing (Terraform, Ansible, Pulumi YAML) provided by the lab.
+- Bonus (custom Checkov policy) not attempted — out of scope per this submission's chosen coverage (Task 1 + Task 2).
